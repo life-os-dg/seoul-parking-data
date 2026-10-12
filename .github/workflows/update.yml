@@ -1,0 +1,47 @@
+name: 주차장 데이터 갱신
+
+# 서울시 API(HTTP 전용)를 서버에서 대신 받아 data/parking.json으로 올린다.
+# 앱은 raw.githubusercontent.com(HTTPS+CORS)에서 이 파일만 읽는다. 인증키는 Secrets에만 있다.
+# 파일 모양은 앱의 src/mirror.ts가 기대하는 {updatedAt, data:{GetParkingInfo:{...}}} 그대로다.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # 무료 스케줄이라 10~20분 밀릴 수 있다 — 앱이 «N분 전 기준»으로 표시한다
+  workflow_dispatch: {} # Actions 탭의 Run workflow 버튼으로 수동 실행
+
+concurrency:
+  group: update-parking
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 서울시 API 호출
+        env:
+          SEOUL_API_KEY: ${{ secrets.SEOUL_API_KEY }}
+        run: |
+          if [ -z "$SEOUL_API_KEY" ]; then
+            echo "::error::SEOUL_API_KEY 시크릿이 비어 있어요 (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+          curl -sS --fail --retry 3 --retry-delay 5 --max-time 30 \
+            "http://openapi.seoul.go.kr:8088/${SEOUL_API_KEY}/json/GetParkingInfo/1/500/" \
+            -o raw.json
+          grep -q '"row"' raw.json || { echo "::error::API 응답이 이상해요"; head -c 300 raw.json; exit 1; }
+          mkdir -p data
+          jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{updatedAt: $t, data: .}' raw.json > data/parking.json
+          rm raw.json
+
+      - name: 변경분 커밋
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/parking.json
+          git diff --staged --quiet || git commit -m "data: $(date -u +%H:%M)"
+          git push
